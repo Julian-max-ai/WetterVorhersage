@@ -1,0 +1,17 @@
+﻿{
+  "name": "wettervorhersage-bot",
+  "version": "1.0.0",
+  "description": "Discord Wetterbot für DWD- und Meteopool-Warnungen in Deutschland.",
+  "main": "WetterVorhersage.js",
+  "scripts": {
+    "start": "node WetterVorhersage.js"
+  },
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "oceanic.js": "latest",
+    "undici": "^6.0.0"
+  }
+}
