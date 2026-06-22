@@ -19,8 +19,8 @@ const DWD_MESOCYCLONES_URL = process.env.DWD_MESOCYCLONES_URL || "https://openda
 const BRIGHT_SKY_API_BASE = process.env.BRIGHT_SKY_API_BASE || "https://api.brightsky.dev";
 const BRIGHT_SKY_LAT = process.env.BRIGHT_SKY_LAT || "51.1657"; // Standardort: Berlin (für Vorhersage)
 const BRIGHT_SKY_LON = process.env.BRIGHT_SKY_LON || "10.4515"; // Standardort: Berlin (für Vorhersage)
-// Hinweis: die Vorhersage-API könnte "latitude" und "longitude" verwenden
-const BRIGHT_SKY_FORECAST_URL = process.env.BRIGHT_SKY_FORECAST_URL || `${BRIGHT_SKY_API_BASE}/weather?latitude=${BRIGHT_SKY_LAT}&longitude=${BRIGHT_SKY_LON}`;
+// Bright Sky API erfordert "lat" und "lon" Parameter (nicht latitude/longitude)
+const BRIGHT_SKY_FORECAST_URL = process.env.BRIGHT_SKY_FORECAST_URL || `${BRIGHT_SKY_API_BASE}/weather?lat=${BRIGHT_SKY_LAT}&lon=${BRIGHT_SKY_LON}`;
 // Alerts für ganz Deutschland (OHNE lat/lon Parameter)
 const BRIGHT_SKY_ALERTS_URL = process.env.BRIGHT_SKY_ALERTS_URL || `${BRIGHT_SKY_API_BASE}/alerts`;
 const DWD_RADAR_URL = "https://www.dwd.de/DE/leistungen/radar/radar_node.html";
@@ -890,7 +890,6 @@ async function startBot() {
 
   client.on("ready", async () => {
     console.log(`Discord verbunden als ${client.user.tag}`);
-    startHealthServer();
     
     // Vorhersage einmalig posten
     await postForecast(client, state);
@@ -907,6 +906,9 @@ async function startBot() {
 }
 
 if (require.main === module) {
+  // Health-Server EINMAL beim Start starten (NICHT im ready-Event!)
+  startHealthServer();
+  
   startBot().catch((error) => {
     console.error("Start des Wetterbots fehlgeschlagen:", error);
     process.exit(1);
