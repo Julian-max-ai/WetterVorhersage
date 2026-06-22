@@ -21,9 +21,8 @@ const BRIGHT_SKY_LAT = process.env.BRIGHT_SKY_LAT || "51.1657"; // Standardort: 
 const BRIGHT_SKY_LON = process.env.BRIGHT_SKY_LON || "10.4515"; // Standardort: Berlin (für Vorhersage)
 // Bright Sky: aktuelles Datum ist beim /weather-Endpunkt zwingend
 const heute = new Date().toISOString().split('T')[0];
-// Verwende brightsky.dev Host (manchmal ist BRIGHT_SKY_API_BASE auf api.brightsky.dev gesetzt)
-const BRIGHT_SKY_HOST = (BRIGHT_SKY_API_BASE || 'https://api.brightsky.dev').replace('api.', '');
-const BRIGHT_SKY_FORECAST_URL = process.env.BRIGHT_SKY_FORECAST_URL || `${BRIGHT_SKY_HOST}/${heute}?lat=${BRIGHT_SKY_LAT}&lon=${BRIGHT_SKY_LON}`;
+// Forecast-URL: behalte 'api.' am Anfang, '/weather' muss vorhanden sein, Datum als '&date='
+const BRIGHT_SKY_FORECAST_URL = process.env.BRIGHT_SKY_FORECAST_URL || `${BRIGHT_SKY_API_BASE}/weather?lat=${BRIGHT_SKY_LAT}&lon=${BRIGHT_SKY_LON}&date=${heute}`;
 // Alerts für ganz Deutschland (OHNE lat/lon Parameter)
 const BRIGHT_SKY_ALERTS_URL = process.env.BRIGHT_SKY_ALERTS_URL || `${BRIGHT_SKY_API_BASE}/alerts`;
 const DWD_RADAR_URL = "https://www.dwd.de/DE/leistungen/radar/radar_node.html";
