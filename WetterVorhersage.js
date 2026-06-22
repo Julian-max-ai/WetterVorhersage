@@ -19,8 +19,11 @@ const DWD_MESOCYCLONES_URL = process.env.DWD_MESOCYCLONES_URL || "https://openda
 const BRIGHT_SKY_API_BASE = process.env.BRIGHT_SKY_API_BASE || "https://api.brightsky.dev";
 const BRIGHT_SKY_LAT = process.env.BRIGHT_SKY_LAT || "51.1657"; // Standardort: Berlin (für Vorhersage)
 const BRIGHT_SKY_LON = process.env.BRIGHT_SKY_LON || "10.4515"; // Standardort: Berlin (für Vorhersage)
-// Bright Sky API erfordert "lat" und "lon" Parameter (nicht latitude/longitude)
-const BRIGHT_SKY_FORECAST_URL = process.env.BRIGHT_SKY_FORECAST_URL || `${BRIGHT_SKY_API_BASE}/weather?lat=${BRIGHT_SKY_LAT}&lon=${BRIGHT_SKY_LON}`;
+// Bright Sky: aktuelles Datum ist beim /weather-Endpunkt zwingend
+const heute = new Date().toISOString().split('T')[0];
+// Verwende brightsky.dev Host (manchmal ist BRIGHT_SKY_API_BASE auf api.brightsky.dev gesetzt)
+const BRIGHT_SKY_HOST = (BRIGHT_SKY_API_BASE || 'https://api.brightsky.dev').replace('api.', '');
+const BRIGHT_SKY_FORECAST_URL = process.env.BRIGHT_SKY_FORECAST_URL || `${BRIGHT_SKY_HOST}/${heute}?lat=${BRIGHT_SKY_LAT}&lon=${BRIGHT_SKY_LON}`;
 // Alerts für ganz Deutschland (OHNE lat/lon Parameter)
 const BRIGHT_SKY_ALERTS_URL = process.env.BRIGHT_SKY_ALERTS_URL || `${BRIGHT_SKY_API_BASE}/alerts`;
 const DWD_RADAR_URL = "https://www.dwd.de/DE/leistungen/radar/radar_node.html";
@@ -581,7 +584,7 @@ async function fetchBrightSkyForecast() {
     console.log(`[BrightSky] Abruf Vorhersage: ${url}`);
     return await fetchJson(url);
   } catch (error) {
-    console.warn('Bright Sky Vorhersage konnte nicht geladen werden:', error.message);
+    console.error('Bright Sky Vorhersage konnte nicht geladen werden:', error);
     return null;
   }
 }
@@ -711,6 +714,10 @@ async function postForecast(client, state) {
     if (!channel) return;
     // Versuche Bright Sky 7-Tage Vorhersage zu verwenden (wenn konfiguriert)
     const brightData = await fetchBrightSkyForecast();
+    if (brightData === null) {
+      console.error('BrightSky Vorhersage konnte nicht geladen werden — Abbruch, sende keine Vorhersage.');
+      return;
+    }
     let embed;
     if (brightData) {
       // Build a clearer 7-day embed
@@ -794,6 +801,11 @@ async function syncWeather(client, state) {
     clearTimeout(timeoutId);
     const data = await res.json();
     const alerts = data && Array.isArray(data.alerts) ? data.alerts : null;
+
+    // Loggen, dass die Alerts-Antwort erfolgreich gelesen wurde (auch wenn 0 Warnungen)
+    if (alerts && Array.isArray(alerts)) {
+      console.log(`[BrightSky Alerts] API erfolgreich abgefragt. Aktive Warnungen in Deutschland: ${alerts.length}. Sende-Sicherung ist aktiv.`);
+    }
 
     // Wenn alerts leer oder nicht vorhanden: nichts senden
     if (!alerts || alerts.length === 0) return;
