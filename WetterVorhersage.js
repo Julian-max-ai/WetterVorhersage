@@ -35,6 +35,9 @@ const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS || 10 * 60 * 1000);
 const ALL_CLEAR_MS = Number(process.env.ALL_CLEAR_MS || 2 * 60 * 60 * 1000);
 const ALERT_ROLE_ID = process.env.ALERT_ROLE_ID || null;
 
+// Globale Referenz zur letzten gesendeten Vorhersage-Nachricht (wird zur stillen Aktualisierung genutzt)
+let vorhersageNachricht = null;
+
 let webcamSources = [];
 if (process.env.WEBCAM_SOURCES) {
   try {
@@ -711,82 +714,138 @@ async function postForecast(client, state) {
   try {
     const channel = await client.rest.channels.get(VORHERSAGE_CHANNEL);
     if (!channel) return;
-    // Versuche Bright Sky 7-Tage Vorhersage zu verwenden (wenn konfiguriert)
+
+    // Abruf der BrightSky-Vorhersage
     const brightData = await fetchBrightSkyForecast();
     if (brightData === null) {
       console.error('BrightSky Vorhersage konnte nicht geladen werden — Abbruch, sende keine Vorhersage.');
       return;
     }
-    let embed;
-    if (brightData) {
-      // Build a clearer 7-day embed
-      const days = Array.isArray(brightData.days) ? brightData.days : brightData;
-      const fields = [];
-      for (const day of days.slice(0, 7)) {
-        const dateStr = new Date(day.date || day.dt || day.timestamp || Date.now()).toLocaleDateString('de-DE', { weekday: 'long', day: 'numeric', month: 'short' });
-        const summary = day.summary || day.description || `${day.temp_min || ''}–${day.temp_max || ''}°C ${day.condition || ''}`;
-        fields.push({ name: `${dateStr}`, value: summary, inline: false });
-      }
-      fields.push({ name: 'Stand', value: formatTimestamp(Date.now()), inline: false });
-      embed = {
-        title: `🌤️ 7‑Tage Vorhersage`,
-        description: `Automatisch aktualisierte 7‑Tage‑Vorhersage (Bright Sky)`,
-        color: 0x0066cc,
-        fields,
-        footer: { text: `Quelle: Bright Sky` },
-        timestamp: new Date().toISOString()
-      };
 
-      // Nur aktualisieren, wenn sich die BrightSky-Daten geändert haben
-      const newHash = JSON.stringify(brightData).slice(0, 20000);
-      if (state.brightSkyForecastHash && state.brightSkyForecastHash === newHash && state.vorhersageMessageId) {
-        // Keine Änderung
-        return;
-      }
-      state.brightSkyForecastHash = newHash;
-    } else {
-      // Fallback: bestehende einfache 2-Tage Übersicht
-      const today = new Date();
-      const tomorrow = new Date(today);
-      tomorrow.setDate(tomorrow.getDate() + 1);
-      const todayStr = today.toLocaleDateString('de-DE', { weekday: 'long', day: 'numeric', month: 'long' });
-      const tomorrowStr = tomorrow.toLocaleDateString('de-DE', { weekday: 'long', day: 'numeric', month: 'long' });
-      const todayText = `**Südwesten** (Baden-Württemberg, Rheinland-Pfalz, Saarland): ☀️ Zumeist sonnig und trocken, 18-22°C.`;
-      const tomorrowText = `**Südwesten** (Baden-Württemberg, Rheinland-Pfalz, Saarland): 🌤️ Wechselhaft, 16-21°C.`;
-      embed = {
-        title: `🌤️ Wettervorhersage für die nächsten 2 Tage`,
-        description: `Regionaler Überblick für Deutschland. Diese Nachricht wird im gleichen Embed aktualisiert.`,
-        color: 0x0099ff,
-        fields: [
-          { name: `Heute – ${todayStr}`, value: todayText, inline: false },
-          { name: `Morgen – ${tomorrowStr}`, value: tomorrowText, inline: false },
-          { name: "Stand", value: formatTimestamp(Date.now()), inline: false }
-        ],
-        footer: { text: "Quelle: DWD | Automatisch aktualisiert" },
-        timestamp: new Date().toISOString()
-      };
+    // Extrahiere stündliche Daten: bevorzugt response.data.weather
+    const weatherArray = (brightData && brightData.data && Array.isArray(brightData.data.weather))
+      ? brightData.data.weather
+      : Array.isArray(brightData.weather)
+        ? brightData.weather
+        : Array.isArray(brightData.days)
+          ? brightData.days
+          : null;
+
+    if (!weatherArray || !weatherArray.length) {
+      console.log('[BrightSky] Keine stündlichen Wetterdaten gefunden, überspringe Vorhersage.');
+      return;
     }
 
-    if (state.vorhersageMessageId) {
+    // Gruppiere stündliche Einträge nach Datum (YYYY-MM-DD)
+    const groups = {};
+    for (const e of weatherArray) {
+      const ts = e.timestamp || e.dt || e.time || e.date || e.datetime;
+      let dateObj = null;
+      if (typeof ts === 'number') {
+        dateObj = new Date(ts < 1e12 ? ts * 1000 : ts);
+      } else if (typeof ts === 'string') {
+        dateObj = new Date(ts);
+      }
+      if (!dateObj || isNaN(dateObj)) continue;
+      const key = dateObj.toISOString().split('T')[0];
+      groups[key] = groups[key] || [];
+      groups[key].push(e);
+    }
+
+    const allDates = Object.keys(groups).sort();
+    if (!allDates.length) {
+      console.log('[BrightSky] Keine gruppierbaren Daten für Vorhersage gefunden.');
+      return;
+    }
+
+    // Wähle 3-7 Tage (min 3, max 7) beginnend ab heute, wenn möglich
+    const heuteStr = new Date().toISOString().split('T')[0];
+    let selected = allDates.filter(d => d >= heuteStr).slice(0, 7);
+    if (selected.length < 3) {
+      selected = allDates.slice(0, Math.min(7, Math.max(3, allDates.length)));
+    }
+
+    const fields = [];
+    for (const dateKey of selected) {
+      const entries = groups[dateKey];
+      // Ermittle min/max Temperatur
+      let temps = entries.map(ent => ent.temperature ?? ent.temp ?? ent.temp_c ?? ent.air_temperature ?? ent.t ?? ent.t2m).filter(t => t !== undefined && t !== null).map(Number).filter(n => !Number.isNaN(n));
+      const minT = temps.length ? Math.min(...temps) : null;
+      const maxT = temps.length ? Math.max(...temps) : null;
+
+      // Bestimme grobe Wetterbeschreibung (häufigste condition/symbol)
+      const condCount = {};
+      for (const ent of entries) {
+        const cond = (ent.condition || ent.summary || ent.description || ent.symbol_code || ent.weather || '').toString();
+        if (!cond) continue;
+        condCount[cond] = (condCount[cond] || 0) + 1;
+      }
+      const sortedCond = Object.entries(condCount).sort((a, b) => b[1] - a[1]);
+      const mainCond = sortedCond.length ? sortedCond[0][0] : '';
+
+      const dateObj = new Date(dateKey + 'T00:00:00Z');
+      const label = dateObj.toLocaleDateString('de-DE', { weekday: 'long', day: 'numeric', month: 'short' });
+      const tempStr = minT !== null && maxT !== null ? `${Math.round(minT)}–${Math.round(maxT)}°C` : 'Keine Temperaturdaten';
+      const summary = `${tempStr} ${mainCond}`.trim();
+      fields.push({ name: `${label}`, value: summary || 'Keine Daten', inline: false });
+    }
+
+    fields.push({ name: 'Stand', value: formatTimestamp(Date.now()), inline: false });
+
+    const embed = {
+      title: `📊 Allgemeiner Wetterbericht für Deutschland (Zentraler Richtwert)`,
+      description: `Automatisch aktualisierte Mehrtages‑Übersicht (Bright Sky) — zentraler Richtwert aus stündlichen Daten.`,
+      color: 0x0066cc,
+      fields,
+      footer: { text: `Quelle: Bright Sky` },
+      timestamp: new Date().toISOString()
+    };
+
+    // Wenn noch keine globale Nachricht existiert: senden und speichern
+    if (!vorhersageNachricht) {
       try {
-        await channel.editMessage(state.vorhersageMessageId, { embeds: [embed] });
-        console.log("Wettervorhersage aktualisiert!");
-        saveState(state);
+        const msg = await channel.createMessage({ embeds: [embed] });
+        vorhersageNachricht = msg;
+        // Optional: persistent speichern
+        try { state.vorhersageMessageId = msg.id; saveState(state); } catch (e) {}
+        console.log('Wettervorhersage gesendet!');
         return;
-      } catch (error) {
-        console.warn("Vorhersage-Bearbeitung fehlgeschlagen, sende neue:", error.message);
-        state.vorhersageMessageId = null;
+      } catch (sendErr) {
+        console.error('Fehler beim Senden der Vorhersage:', sendErr);
+        return;
       }
     }
 
-    const msg = await channel.createMessage({ embeds: [embed] });
-    state.vorhersageMessageId = msg.id;
-    saveState(state);
-    console.log("Wettervorhersage gesendet!");
+    // Versuch, die existierende Nachricht zu bearbeiten
+    try {
+      if (typeof vorhersageNachricht.edit === 'function') {
+        await vorhersageNachricht.edit({ embeds: [embed] });
+      } else if (vorhersageNachricht.id) {
+        // Fallback: edit via Channel
+        await channel.editMessage(vorhersageNachricht.id, { embeds: [embed] });
+      } else {
+        throw new Error('Keine gültige Vorhersage-Nachricht zum Editieren.');
+      }
+      console.log('Wettervorhersage still aktualisiert.');
+    } catch (editErr) {
+      console.warn('Bearbeiten der Vorhersage fehlgeschlagen, sende neu:', editErr);
+      // Zur Sicherheit zurücksetzen, damit beim nächsten Lauf neu gesendet wird
+      vorhersageNachricht = null;
+      if (state.vorhersageMessageId) { state.vorhersageMessageId = null; saveState(state); }
+      try {
+        const msg2 = await channel.createMessage({ embeds: [embed] });
+        vorhersageNachricht = msg2;
+        try { state.vorhersageMessageId = msg2.id; saveState(state); } catch (e) {}
+        console.log('Wettervorhersage gesendet (Fallback).');
+      } catch (sendErr2) {
+        console.error('Fehler beim Senden der Vorhersage im Fallback:', sendErr2);
+      }
+    }
   } catch (error) {
-    console.error("Vorhersage konnte nicht gesendet werden:", error.message);
+    console.error('Vorhersage konnte nicht gesendet werden:', error && error.message ? error.message : error);
   }
 }
+
 
 async function syncWeather(client, state) {
   // BrightSky-only implementation: use https://api.brightsky.dev/alerts
