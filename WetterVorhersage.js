@@ -848,11 +848,10 @@ async function postForecast(client, state) {
 
 
 async function syncWeather(client, state) {
-  // BrightSky-only implementation: use https://api.brightsky.dev/alerts
+  // BrightSky-only implementation: group alerts per Bundesland and send one embed per state
   try {
     const now = Date.now();
     const url = process.env.BRIGHT_SKY_ALERTS_URL || 'https://api.brightsky.dev/alerts';
-    // Use fetch with AbortController for timeout
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 15000);
     const res = await fetch(url, { headers: { 'User-Agent': 'WetterBot/1.0' }, signal: controller.signal });
@@ -860,82 +859,91 @@ async function syncWeather(client, state) {
     const data = await res.json();
     const alerts = data && Array.isArray(data.alerts) ? data.alerts : null;
 
-    // Loggen, dass die Alerts-Antwort erfolgreich gelesen wurde (auch wenn 0 Warnungen)
     if (alerts && Array.isArray(alerts)) {
       console.log(`[BrightSky Alerts] API erfolgreich abgefragt. Aktive Warnungen in Deutschland: ${alerts.length}. Sende-Sicherung ist aktiv.`);
     }
-
-    // Wenn alerts leer oder nicht vorhanden: nichts senden
     if (!alerts || alerts.length === 0) return;
 
-    // Lade persistent gespeicherte gesendete Keys in das Set
-    state.sentAlertKeys = Array.isArray(state.sentAlertKeys) ? state.sentAlertKeys : [];
-    for (const k of state.sentAlertKeys) gesendeteWarnungen.add(k);
+    // Gruppiere Alerts nach Bundesland (letztes Element in alert.regions)
+    const stateGroups = {};
+    for (const alert of alerts) {
+      if (!alert) continue;
+      const headline = String(alert.headline || alert.title || alert.event || 'Warnung').trim();
+      const description = String(alert.description || alert.body || '').trim();
 
-    // Beim ersten Lauf: markiere alle aktuellen Alerts als bereits gesehen (kein Senden), um Spam beim Start zu vermeiden
-    if (!state.brightSkySeenInitial) {
-      for (const alert of alerts) {
-        if (!alert || !alert.id) continue;
-        let startNum = Number(alert.start || alert.onset || 0) || 0;
-        if (startNum && startNum < 1e12) startNum = startNum * 1000; // evtl. in Sekunden geliefert
-        const key = `${alert.id}:${startNum}`;
-        if (!gesendeteWarnungen.has(key)) {
-          gesendeteWarnungen.add(key);
-          state.sentAlertKeys.push(key);
+      // Regions kann Array oder String sein
+      let regionsArr = [];
+      if (Array.isArray(alert.regions) && alert.regions.length) regionsArr = alert.regions.map(r => String(r).trim()).filter(Boolean);
+      else if (typeof alert.regions === 'string' && alert.regions.trim()) regionsArr = alert.regions.split(',').map(s => s.trim()).filter(Boolean);
+      else if (alert.region) regionsArr = [String(alert.region).trim()];
+
+      const stateName = regionsArr.length ? regionsArr[regionsArr.length - 1] : 'Deutschland';
+      const counties = regionsArr.length > 1 ? regionsArr.slice(0, -1) : (regionsArr.length === 1 ? [regionsArr[0]] : ['Deutschland']);
+
+      stateGroups[stateName] = stateGroups[stateName] || {};
+      const groupKey = headline;
+      if (!stateGroups[stateName][groupKey]) {
+        stateGroups[stateName][groupKey] = { description, counties: new Set() };
+      }
+      for (const c of counties) stateGroups[stateName][groupKey].counties.add(c);
+    }
+
+    // Prepare state for sent summaries
+    state.sentStateSummaries = Array.isArray(state.sentStateSummaries) ? state.sentStateSummaries : [];
+    const seenSet = new Set(state.sentStateSummaries);
+
+    // On first run: learn existing summaries silently
+    if (!state.stateSummarySeenInitial) {
+      for (const [stateName, groups] of Object.entries(stateGroups)) {
+        for (const [headline, info] of Object.entries(groups)) {
+          const counties = Array.from(info.counties).sort();
+          const key = `${stateName}:${headline}:${counties.join('|')}`;
+          if (!seenSet.has(key)) {
+            seenSet.add(key);
+            state.sentStateSummaries.push(key);
+          }
         }
       }
-      state.brightSkySeenInitial = true;
+      state.stateSummarySeenInitial = true;
       saveState(state);
       return;
     }
 
-    // Normale Polling-Läufe: nur neue Alerts senden (Alert-ID + Start) und nur wenn Start in der Zukunft
-    for (const alert of alerts) {
-      if (!alert || !alert.id) continue;
-      let startNum = Number(alert.start || alert.onset || 0) || 0;
-      if (startNum && startNum < 1e12) startNum = startNum * 1000;
-      const key = `${alert.id}:${startNum}`;
-      if (gesendeteWarnungen.has(key)) continue; // schon gesendet
+    // For each Bundesland and each grouped headline, send an embed if not seen
+    for (const [stateName, groups] of Object.entries(stateGroups)) {
+      for (const [headline, info] of Object.entries(groups)) {
+        const counties = Array.from(info.counties).sort();
+        const countiesStr = counties.join(', ') || 'Gesamtgebiet';
+        const key = `${stateName}:${headline}:${counties.join('|')}`;
+        if (seenSet.has(key)) continue; // already announced
 
-      // Nur zukünftige Alerts senden (start in der Zukunft)
-      if (!startNum || startNum <= now) {
-        // nicht senden, aber merke als gesehen, damit wir es nicht später erneut prüfen
-        gesendeteWarnungen.add(key);
-        state.sentAlertKeys.push(key);
-        continue;
-      }
+        // Build embed
+        const embed = {
+          title: `⚠️ Wetterwarnungen für ${stateName}`,
+          color: 0xff3300,
+          fields: [
+            { name: 'Details', value: `${headline}\n\n${info.description || 'Keine zusätzliche Beschreibung.'}`.substring(0, 1024), inline: false },
+            { name: 'Betroffene Regionen', value: countiesStr.substring(0, 1024), inline: false }
+          ],
+          footer: { text: 'Quelle: Bright Sky — Gruppierte Zusammenfassung' },
+          timestamp: new Date().toISOString()
+        };
 
-      const title = String(alert.headline || alert.title || 'Warnung').substring(0, 256);
-      const description = String(alert.description || '').substring(0, 4096);
-      const regions = Array.isArray(alert.regions) ? alert.regions.join(', ') : (alert.regions ? String(alert.regions) : 'Deutschland');
-      const severity = String(alert.severity || 'Unbekannt');
-
-      const embed = {
-        title,
-        description,
-        color: 0xff3300,
-        fields: [
-          { name: 'Betroffenes Gebiet', value: regions || 'Deutschland', inline: false },
-          { name: 'Warnstufe', value: severity || 'Unbekannt', inline: true }
-        ],
-        footer: { text: 'Quelle: Bright Sky' },
-        timestamp: new Date().toISOString()
-      };
-
-      try {
-        await sendEmbed(client, WARNUNGEN_CHANNEL, null, embed, null, null);
-        gesendeteWarnungen.add(key);
-        state.sentAlertKeys.push(key);
-        saveState(state);
-      } catch (err) {
-        console.warn('Senden der BrightSky-Warnung fehlgeschlagen:', err.message || err);
+        try {
+          await sendEmbed(client, WARNUNGEN_CHANNEL, null, embed, null, ALERT_ROLE_ID);
+          seenSet.add(key);
+          state.sentStateSummaries.push(key);
+          saveState(state);
+        } catch (err) {
+          console.warn('Senden der gruppierten Bundesland-Warnung fehlgeschlagen:', err && err.message ? err.message : err);
+        }
       }
     }
 
     state.letzteSync = now;
     saveState(state);
   } catch (err) {
-    console.warn('BrightSky Abruf fehlgeschlagen:', err.message || err);
+    console.warn('BrightSky Abruf fehlgeschlagen:', err && err.message ? err.message : err);
     return;
   }
 }
