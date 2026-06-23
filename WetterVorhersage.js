@@ -28,7 +28,7 @@ const BRIGHT_SKY_ALERTS_URL = process.env.BRIGHT_SKY_ALERTS_URL || `${BRIGHT_SKY
 const DWD_RADAR_URL = "https://www.dwd.de/DE/leistungen/radar/radar_node.html";
 const DWD_SATELLITE_URL = "https://www.dwd.de/DE/leistungen/satelliten/satelliten_node.html";
 const VORHERSAGE_CHANNEL = process.env.VORHERSAGE_CHANNEL || "1501635539202216107";
-const WARNUNGEN_CHANNEL = process.env.WARNUNGEN_CHANNEL || "1501843095485022350";
+const WARNUNGEN_CHANNEL = process.env.WARNUNGEN_CHANNEL || "1501843095485022350";s
 const STATE_FILE = path.join(__dirname, "wetterState.json");
 // Standard: jede 10 Minuten prüfen
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS || 10 * 60 * 1000);
