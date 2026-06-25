@@ -17,24 +17,26 @@ const METEOPPOOL_URL = process.env.METEOPPOOL_URL || "https://www.meteopool.de/r
 const DWD_MESOCYCLONES_URL = process.env.DWD_MESOCYCLONES_URL || "https://opendata.dwd.de/weather/radar/mesocyclones/";
 // Bright Sky API: echte API-Endpunkte
 const BRIGHT_SKY_API_BASE = process.env.BRIGHT_SKY_API_BASE || "https://api.brightsky.dev";
-const BRIGHT_SKY_LAT = process.env.BRIGHT_SKY_LAT || "51.1657"; // Standardort: Berlin (für Vorhersage)
-const BRIGHT_SKY_LON = process.env.BRIGHT_SKY_LON || "10.4515"; // Standardort: Berlin (für Vorhersage)
+const BRIGHT_SKY_LAT = process.env.BRIGHT_SKY_LAT || "51.1657"; // Standardort: Berlin (f�r Vorhersage)
+const BRIGHT_SKY_LON = process.env.BRIGHT_SKY_LON || "10.4515"; // Standardort: Berlin (f�r Vorhersage)
 // Bright Sky: aktuelles Datum ist beim /weather-Endpunkt zwingend
 const heute = new Date().toISOString().split('T')[0];
 // Forecast-URL: behalte 'api.' am Anfang, '/weather' muss vorhanden sein, Datum als '&date='
 const BRIGHT_SKY_FORECAST_URL = process.env.BRIGHT_SKY_FORECAST_URL || `${BRIGHT_SKY_API_BASE}/weather?lat=${BRIGHT_SKY_LAT}&lon=${BRIGHT_SKY_LON}&date=${heute}`;
-// Alerts für ganz Deutschland (OHNE lat/lon Parameter)
+// Alerts f�r ganz Deutschland (OHNE lat/lon Parameter)
 const BRIGHT_SKY_ALERTS_URL = process.env.BRIGHT_SKY_ALERTS_URL || `${BRIGHT_SKY_API_BASE}/alerts`;
 const DWD_RADAR_URL = "https://www.dwd.de/DE/leistungen/radar/radar_node.html";
 const DWD_SATELLITE_URL = "https://www.dwd.de/DE/leistungen/satelliten/satelliten_node.html";
 const VORHERSAGE_CHANNEL = process.env.VORHERSAGE_CHANNEL || "1501635539202216107";
 const WARNUNGEN_CHANNEL = process.env.WARNUNGEN_CHANNEL || "1501843095485022350";
 const STATE_FILE = path.join(__dirname, "wetterState.json");
-// Standard: jede 10 Minuten prüfen
-const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS || 10 * 60 * 1000);
+// Standard: jede 60 Sekunden pr�fen
+const POLL_INTERVAL_MS = 60 * 1000;
 const ALL_CLEAR_MS = Number(process.env.ALL_CLEAR_MS || 2 * 60 * 60 * 1000);
 const ALERT_ROLE_ID = process.env.ALERT_ROLE_ID || null;
 
+let istBereit = false;
+let bundeslandEmbedIds = {};
 // Globale Referenz zur letzten gesendeten Vorhersage-Nachricht (wird zur stillen Aktualisierung genutzt)
 let vorhersageNachricht = null;
 
@@ -44,7 +46,7 @@ if (process.env.WEBCAM_SOURCES) {
     webcamSources = JSON.parse(process.env.WEBCAM_SOURCES);
     if (!Array.isArray(webcamSources)) webcamSources = [];
   } catch (error) {
-    console.warn("WEBCAM_SOURCES ist kein gültiges JSON-Array, der Bot überspringt Webcam-Integration.");
+    console.warn("WEBCAM_SOURCES ist kein g�ltiges JSON-Array, der Bot �berspringt Webcam-Integration.");
     webcamSources = [];
   }
 }
@@ -61,7 +63,7 @@ function ensureFetch() {
 
 ensureFetch();
 
-// Set für bereits gesendete BrightSky-Warnungen (alert.id)
+// Set f�r bereits gesendete BrightSky-Warnungen (alert.id)
 let gesendeteWarnungen = new Set();
 
 function loadState() {
@@ -96,13 +98,13 @@ function formatTimestamp(value) {
 }
 
 function findNearestCity(text) {
-  if (!text) return "Unbekannte Großstadt";
+  if (!text) return "Unbekannte Gro�stadt";
   const normalized = text.toLowerCase();
 
-  // Bundesländer zu Großstädten mapping
+  // Bundesl�nder zu Gro�st�dten mapping
   const stateToCity = {
-    "baden-württemberg": "Stuttgart",
-    "bayern": "München",
+    "baden-w�rttemberg": "Stuttgart",
+    "bayern": "M�nchen",
     "berlin": "Berlin",
     "brandenburg": "Potsdam",
     "bremen": "Bremen",
@@ -110,19 +112,19 @@ function findNearestCity(text) {
     "hessen": "Frankfurt am Main",
     "mecklenburg-vorpommern": "Rostock",
     "niedersachsen": "Hannover",
-    "nordrhein-westfalen": "Köln",
+    "nordrhein-westfalen": "K�ln",
     "rheinland-pfalz": "Mainz",
-    "saarland": "Saarbrücken",
+    "saarland": "Saarbr�cken",
     "sachsen": "Dresden",
     "sachsen-anhalt": "Magdeburg",
     "schleswig-holstein": "Kiel",
-    "thüringen": "Erfurt"
+    "th�ringen": "Erfurt"
   };
 
-  // Zusätzliche Aliase und Schreibweisen für Bundesländer
+  // Zus�tzliche Aliase und Schreibweisen f�r Bundesl�nder
   const aliases = {
-    "bw": "baden-württemberg",
-    "bawue": "baden-württemberg",
+    "bw": "baden-w�rttemberg",
+    "bawue": "baden-w�rttemberg",
     "by": "bayern",
     "nrw": "nordrhein-westfalen",
     "rlp": "rheinland-pfalz",
@@ -132,13 +134,13 @@ function findNearestCity(text) {
     "sachsen-anhalt": "sachsen-anhalt",
     "sa": "sachsen-anhalt",
     "sachsen": "sachsen",
-    "thüringen": "thüringen",
+    "th�ringen": "th�ringen",
   };
 
-  // Spezifische Städte
+  // Spezifische St�dte
   const cities = {
     "stuttgart": "Stuttgart",
-    "münchen": "München",
+    "m�nchen": "M�nchen",
     "berlin": "Berlin",
     "potsdam": "Potsdam",
     "bremen": "Bremen",
@@ -146,18 +148,18 @@ function findNearestCity(text) {
     "frankfurt": "Frankfurt am Main",
     "rostock": "Rostock",
     "hannover": "Hannover",
-    "köln": "Köln",
+    "k�ln": "K�ln",
     "mainz": "Mainz",
-    "saarbrücken": "Saarbrücken",
+    "saarbr�cken": "Saarbr�cken",
     "dresden": "Dresden",
     "magdeburg": "Magdeburg",
     "kiel": "Kiel",
     "erfurt": "Erfurt",
-    "düsseldorf": "Düsseldorf",
+    "d�sseldorf": "D�sseldorf",
     "dortmund": "Dortmund",
     "essen": "Essen",
     "leipzig": "Leipzig",
-    "nürnberg": "Nürnberg",
+    "n�rnberg": "N�rnberg",
     "dresden": "Dresden",
     "hannover": "Hannover",
     "bremen": "Bremen",
@@ -169,20 +171,20 @@ function findNearestCity(text) {
     "wiesbaden": "Wiesbaden",
     "kassel": "Kassel",
     "schwerin": "Schwerin",
-    "saarbrücken": "Saarbrücken",
+    "saarbr�cken": "Saarbr�cken",
     "chemnitz": "Chemnitz",
     "halle": "Halle",
     "jena": "Jena"
   };
 
-  // Zuerst nach spezifischen Städten suchen
+  // Zuerst nach spezifischen St�dten suchen
   for (const key of Object.keys(cities)) {
     if (normalized.includes(key)) {
       return cities[key];
     }
   }
 
-  // Dann nach Bundesländern suchen
+  // Dann nach Bundesl�ndern suchen
   for (const key of Object.keys(stateToCity)) {
     if (normalized.includes(key)) {
       return stateToCity[key];
@@ -192,11 +194,11 @@ function findNearestCity(text) {
   // Aliase
   for (const [k, v] of Object.entries(aliases)) {
     if (normalized.includes(k)) {
-      return stateToCity[v] || "Unbekannte Großstadt";
+      return stateToCity[v] || "Unbekannte Gro�stadt";
     }
   }
 
-  return "Unbekannte Großstadt";
+  return "Unbekannte Gro�stadt";
 }
 
 function crossesCity(entry, city) {
@@ -224,14 +226,14 @@ function inferDirection(entry) {
   if (entry.richtung) return entry.richtung;
   const text = `${entry.beschreibung || ""}`.toLowerCase();
 
-  // Präzisere Richtungserkennung
+  // Pr�zisere Richtungserkennung
   if (text.includes("nordosten")) return "Nordosten";
   if (text.includes("nordwesten")) return "Nordwesten";
-  if (text.includes("südosten")) return "Südosten";
-  if (text.includes("südwesten")) return "Südwesten";
+  if (text.includes("s�dosten")) return "S�dosten";
+  if (text.includes("s�dwesten")) return "S�dwesten";
   if (text.includes("nord")) return "Norden";
   if (text.includes("ost")) return "Osten";
-  if (text.includes("süd")) return "Süden";
+  if (text.includes("s�d")) return "S�den";
   if (text.includes("west")) return "Westen";
 
   return "Unbekannt";
@@ -249,15 +251,15 @@ function getAlertLevel(entry) {
 
 function getTornadoProbability(entry) {
   if (entry.kategorie === "tornado") return "Sehr hoch";
-  if (entry.kategorie === "rotation") return "Erhöht";
+  if (entry.kategorie === "rotation") return "Erh�ht";
   const text = `${entry.beschreibung || ""}`.toLowerCase();
-  if (text.includes("tornado")) return "Erhöht";
+  if (text.includes("tornado")) return "Erh�ht";
   if (text.includes("rotation") || text.includes("wallcloud")) return "Moderat";
   return "Unbekannt";
 }
 
 function getRadarLinks() {
-  return `[DWD Radar](${DWD_RADAR_URL}) • [Satellit](${DWD_SATELLITE_URL})`;
+  return `[DWD Radar](${DWD_RADAR_URL}) � [Satellit](${DWD_SATELLITE_URL})`;
 }
 
 function findWebcamUrl(entry) {
@@ -284,64 +286,64 @@ function buildEmbed(entry) {
   // Farbcodierung basierend auf Warnstufe/Kategorie
   let embedColor = 0x0099ff; // Standard blau
   if (entry.kategorie === "tornado") {
-    embedColor = 0xff0000; // Rot für Tornado
+    embedColor = 0xff0000; // Rot f�r Tornado
   } else if (entry.kategorie === "rotation") {
-    if (rotationStrenght >= 4) embedColor = 0xff0000; // Rot für 4/5-5/5
-    else if (rotationStrenght >= 3) embedColor = 0xff6600; // Orange für 3/5
-    else embedColor = 0xffcc00; // Gelb für 1/5-2/5
+    if (rotationStrenght >= 4) embedColor = 0xff0000; // Rot f�r 4/5-5/5
+    else if (rotationStrenght >= 3) embedColor = 0xff6600; // Orange f�r 3/5
+    else embedColor = 0xffcc00; // Gelb f�r 1/5-2/5
   } else if (alertLevel === "Extrem") {
     embedColor = 0xff0000; // Rot
   } else if (alertLevel === "Hoch") {
     embedColor = 0xff6600; // Orange
   } else if (alertLevel === "Gering") {
-    embedColor = 0x00aa00; // Grün für Gering
+    embedColor = 0x00aa00; // Gr�n f�r Gering
   } else if (alertLevel === "Gering") {
-    embedColor = 0x00aa00; // Grün für Gering
+    embedColor = 0x00aa00; // Gr�n f�r Gering
   }
 
   const fields = [
     { name: "Quelle", value: entry.quelle, inline: true },
-    { name: "Phänomen", value: entry.ereignis || "Unbekannt", inline: true },
+    { name: "Ph�nomen", value: entry.ereignis || "Unbekannt", inline: true },
     { name: "Warnstufe", value: alertLevel, inline: true }
   ];
 
   // Zeige Orts-Felder je nach Quelle an
   if (entry.quelle === 'BrightSky') {
-    // Für Bright Sky: zeige die Regionen
+    // F�r Bright Sky: zeige die Regionen
     fields.push({ name: "Betroffene Landkreise", value: entry.landkreis || "Unbekannt", inline: false });
   } else {
-    // Für DWD und andere: zeige Bundesland und Landkreis
+    // F�r DWD und andere: zeige Bundesland und Landkreis
     fields.push({ name: "Bundesland, Landkreis", value: `${entry.region || "Unbekannt"}, ${entry.landkreis || "Unbekannt"}`, inline: false });
-    fields.push({ name: "Nächste Großstadt", value: city, inline: false });
-    fields.push({ name: "Wird diese Stadt überquert?", value: crosses ? `Ja, ${city} liegt im möglichen Wirkungsbereich dieser Warnung.` : `Nein, ${city} liegt außerhalb des betroffenen Bereichs.`, inline: false });
+    fields.push({ name: "N�chste Gro�stadt", value: city, inline: false });
+    fields.push({ name: "Wird diese Stadt �berquert?", value: crosses ? `Ja, ${city} liegt im m�glichen Wirkungsbereich dieser Warnung.` : `Nein, ${city} liegt au�erhalb des betroffenen Bereichs.`, inline: false });
   }
 
   if (entry.kategorie === "rotation" || entry.kategorie === "tornado") {
-    // Für Rotationen/Tornados
-    fields.push({ name: "Stärke", value: entry.kategorie === "tornado" ? fujita : rotationStrenght + "/5", inline: true });
-    fields.push({ name: "Bestätigung in Deutschland", value: confirmed ? "Ja ✓" : "Noch nicht bestätigt", inline: true });
+    // F�r Rotationen/Tornados
+    fields.push({ name: "St�rke", value: entry.kategorie === "tornado" ? fujita : rotationStrenght + "/5", inline: true });
+    fields.push({ name: "Best�tigung in Deutschland", value: confirmed ? "Ja ?" : "Noch nicht best�tigt", inline: true });
     
-    const riskText = rotationStrenght >= 4 ? "Sehr hohes Risiko" : rotationStrenght >= 3 ? "Hohes Risiko" : "Erhöhtes Risiko";
+    const riskText = rotationStrenght >= 4 ? "Sehr hohes Risiko" : rotationStrenght >= 3 ? "Hohes Risiko" : "Erh�htes Risiko";
     fields.push({ name: "Tornado-Risiko", value: `${tornadoProb} (${riskText})`, inline: true });
     
-    fields.push({ name: "Entwicklung", value: entry.entwicklung || "Rotation kann sich verstärken, abschwächen oder zu einem Tornado entwickeln. Beobachte Zugrichtung, Aufwindkern und Niederschlagsstruktur.", inline: false });
-    fields.push({ name: "Zugrichtung", value: `${direction} — nahegelegene Orte beobachten.`, inline: false });
+    fields.push({ name: "Entwicklung", value: entry.entwicklung || "Rotation kann sich verst�rken, abschw�chen oder zu einem Tornado entwickeln. Beobachte Zugrichtung, Aufwindkern und Niederschlagsstruktur.", inline: false });
+    fields.push({ name: "Zugrichtung", value: `${direction} � nahegelegene Orte beobachten.`, inline: false });
   } else if (entry.quelle === 'BrightSky') {
-    // Für Bright Sky Warnungen: zeige Beschreibung (gekürzt auf Discord-Limit)
-    const desc = entry.beschreibung || "Keine zusätzliche Beschreibung verfügbar.";
+    // F�r Bright Sky Warnungen: zeige Beschreibung (gek�rzt auf Discord-Limit)
+    const desc = entry.beschreibung || "Keine zus�tzliche Beschreibung verf�gbar.";
     const truncatedDesc = desc.length > 1000 ? desc.substring(0, 997) + '...' : desc;
     fields.push({ name: "Details", value: truncatedDesc, inline: false });
   } else {
-    // Für sonstige Warnungen
+    // F�r sonstige Warnungen
     fields.push({ name: "Schwere", value: entry.schwere || "Unbekannt", inline: true });
-    fields.push({ name: "Stärke", value: fujita, inline: true });
-    const desc = entry.beschreibung || "Keine zusätzliche Beschreibung verfügbar.";
+    fields.push({ name: "St�rke", value: fujita, inline: true });
+    const desc = entry.beschreibung || "Keine zus�tzliche Beschreibung verf�gbar.";
     const truncatedDesc = desc.length > 1000 ? desc.substring(0, 997) + '...' : desc;
     fields.push({ name: "Beschreibung", value: truncatedDesc, inline: false });
   }
 
   if (entry.start && entry.ende) {
-    fields.push({ name: "Gültig", value: `${formatTimestamp(entry.start)} bis ${formatTimestamp(entry.ende)}`, inline: false });
+    fields.push({ name: "G�ltig", value: `${formatTimestamp(entry.start)} bis ${formatTimestamp(entry.ende)}`, inline: false });
   }
 
   fields.push({ name: "Ausgegeben", value: formatTimestamp(entry.letztesUpdate), inline: true });
@@ -351,12 +353,12 @@ function buildEmbed(entry) {
     fields.push({ name: "Webcam", value: `[Livebild ansehen](${webcamUrl})`, inline: true });
   }
 
-  // Kürze lange Titel
+  // K�rze lange Titel
   const truncatedTitle = String(entry.ereignis || entry.titel || "Wetterlage").substring(0, 200);
 
   return {
-    title: `${entry.icon || "⚠️"} ${truncatedTitle}`,
-    description: String(entry.beschreibung || "Übersicht der aktuellen Wetterlage").substring(0, 1000),
+    title: `${entry.icon || "??"} ${truncatedTitle}`,
+    description: String(entry.beschreibung || "�bersicht der aktuellen Wetterlage").substring(0, 1000),
     color: embedColor,
     fields,
     footer: { text: `Quelle: ${entry.quelle} | Automatisch aktualisiert` },
@@ -373,7 +375,7 @@ function getRotationStrength(entry) {
   if (text.includes("1/5")) return 1;
   if (text.includes("extrem")) return 5;
   if (text.includes("sehr")) return 4;
-  if (text.includes("erhöht")) return 3;
+  if (text.includes("erh�ht")) return 3;
   return 1;
 }
 
@@ -397,11 +399,11 @@ function hashEntry(entry) {
 
 function normalizeEntry(raw, quelle) {
   return {
-    id: raw.id || null, // Für Deduplication (z.B. alert.id aus Bright Sky)
+    id: raw.id || null, // F�r Deduplication (z.B. alert.id aus Bright Sky)
     quelle: quelle || raw.quelle || "DWD",
     titel: raw.titel || raw.ereignis || raw.type || "Wetterlage",
     ereignis: raw.ereignis || raw.titel || raw.type || "Wetterlage",
-    beschreibung: raw.beschreibung || raw.description || raw.comment || "Keine zusätzliche Beschreibung.",
+    beschreibung: raw.beschreibung || raw.description || raw.comment || "Keine zus�tzliche Beschreibung.",
     landkreis: raw.landkreis || raw.region || raw.area || raw.location || "Unbekannt",
     region: raw.region || raw.state || raw.bundesland || "",
     schwere: raw.schwere || raw.severity || raw.level || raw.alertLevel || "Unbekannt",
@@ -417,7 +419,7 @@ function normalizeEntry(raw, quelle) {
     bilder: Array.isArray(raw.bilder) ? raw.bilder : raw.bild ? [raw.bild] : Array.isArray(raw.images) ? raw.images : raw.image ? [raw.image] : [],
     mehrInfoUrl: raw.mehrInfoUrl || raw.url || raw.link || raw.uri || "",
     webcamUrl: raw.webcamUrl || null,
-    icon: raw.icon || (raw.kategorie === "tornado" ? "🌪️" : raw.kategorie === "rotation" ? "🌩️" : "⚠️"),
+    icon: raw.icon || (raw.kategorie === "tornado" ? "???" : raw.kategorie === "rotation" ? "???" : "??"),
     farbe: raw.farbe || null,
     entwicklung: raw.entwicklung || raw.analysis || raw.assessment || ""
   };
@@ -445,21 +447,21 @@ async function fetchDwdWarnings() {
   if (lastError) {
     throw lastError;
   }
-  throw new Error("Keine DWD-Warnquelle verfügbar.");
+  throw new Error("Keine DWD-Warnquelle verf�gbar.");
 }
 
 function parseDwdData(data) {
   if (!data) {
-    // Mock-Daten für Testzwecke
-    console.log("Verwende Mock-DWD-Daten für Testzwecke");
+    // Mock-Daten f�r Testzwecke
+    console.log("Verwende Mock-DWD-Daten f�r Testzwecke");
     data = {
       alerts: [
         {
           region: "Bayern",
-          area: "München",
+          area: "M�nchen",
           severity: "gelb",
           event: "Starkregen",
-          description: "Es wird mit Starkregen gerechnet. In den nächsten Stunden können 20-30 l/m² fallen.",
+          description: "Es wird mit Starkregen gerechnet. In den n�chsten Stunden k�nnen 20-30 l/m� fallen.",
           onset: Date.now() + 300000, // in 5 Minuten (damit es als warning gilt)
           ends: Date.now() + 7200000, // in 2 Stunden
           sent: Date.now(),
@@ -467,10 +469,10 @@ function parseDwdData(data) {
         },
         {
           region: "Nordrhein-Westfalen",
-          area: "Köln",
+          area: "K�ln",
           severity: "orange",
           event: "Gewitter",
-          description: "Gewitter mit Starkregen und Hagel möglich. Lokale Überschwemmungen nicht ausgeschlossen.",
+          description: "Gewitter mit Starkregen und Hagel m�glich. Lokale �berschwemmungen nicht ausgeschlossen.",
           onset: Date.now() + 600000, // in 10 Minuten (damit es als warning gilt)
           ends: Date.now() + 10800000, // in 3 Stunden
           sent: Date.now(),
@@ -489,7 +491,7 @@ function parseDwdData(data) {
     const landkreis = props.area || props.region || props.location || region || "Unbekannt";
     const schwere = props.severity || props.level || props.alertLevel || props.levelName || "Unbekannt";
     const ereignis = props.event || props.title || "Wetterwarnung";
-    const beschreibung = props.description || props.body || "Keine zusätzliche Beschreibung.";
+    const beschreibung = props.description || props.body || "Keine zus�tzliche Beschreibung.";
     const start = props.onset || props.start || props.begin || null;
     const ende = props.ends || props.end || props.stop || null;
     const letztesUpdate = props.sent || props.updated || props.lastUpdate || Date.now();
@@ -522,7 +524,7 @@ function parseDwdMesocycloneData(data) {
   const entries = [];
   if (!data) return entries;
 
-  // Daten können verschieden strukturiert sein; versuche mehrere Formen
+  // Daten k�nnen verschieden strukturiert sein; versuche mehrere Formen
   const items = Array.isArray(data) ? data : Array.isArray(data.features) ? data.features : [];
 
   for (const item of items) {
@@ -560,7 +562,7 @@ function parseDwdMesocycloneData(data) {
   return entries;
 }
 
-// Bright Sky (DWD-Daten) integration — optional, wenn BRIGHT_SKY_URL gesetzt ist.
+// Bright Sky (DWD-Daten) integration � optional, wenn BRIGHT_SKY_URL gesetzt ist.
 async function fetchBrightSkyWarnings() {
   const url = BRIGHT_SKY_ALERTS_URL;
   if (!url) {
@@ -598,7 +600,7 @@ function parseBrightSkyWarnings(data) {
     return [];
   }
 
-  // Mögliche Formen: Array direkt, { alerts: [...] }, { features: [...] }
+  // M�gliche Formen: Array direkt, { alerts: [...] }, { features: [...] }
   let items = [];
   if (Array.isArray(data)) items = data;
   else if (Array.isArray(data.alerts)) items = data.alerts;
@@ -606,7 +608,7 @@ function parseBrightSkyWarnings(data) {
   else if (Array.isArray(data.data)) items = data.data;
 
   if (!items.length) {
-    console.log('[BrightSky] Warnungsliste ist leer — keine Warnungen vorhanden.');
+    console.log('[BrightSky] Warnungsliste ist leer � keine Warnungen vorhanden.');
     return [];
   }
 
@@ -620,7 +622,7 @@ function parseBrightSkyWarnings(data) {
     const instruction = w.instruction || '';
     const fullDesc = instruction ? `${description}\n\n**Handlungsempfehlung:** ${instruction}` : description;
     
-    // Severity-Mapping für Deutsche Warnstufen
+    // Severity-Mapping f�r Deutsche Warnstufen
     const severityMap = {
       'minor': 'Leicht',
       'moderate': 'Mittel',
@@ -636,7 +638,7 @@ function parseBrightSkyWarnings(data) {
     const url = w.url || w.link || w.moreInfo || '';
 
     return normalizeEntry({
-      id: w.id || null, // Bright Sky alert.id für Deduplication
+      id: w.id || null, // Bright Sky alert.id f�r Deduplication
       quelle: 'BrightSky',
       ereignis: headline,
       beschreibung: fullDesc,
@@ -660,7 +662,7 @@ function parseBrightSkyForecast(data) {
     return null;
   }
 
-  // Mögliche Formate: { days: [...] } oder { daily: [...] } oder direkt array
+  // M�gliche Formate: { days: [...] } oder { daily: [...] } oder direkt array
   const days = Array.isArray(data.days) ? data.days : Array.isArray(data.daily) ? data.daily : Array.isArray(data) ? data : null;
   if (!days) {
     console.log('[BrightSky] Keine Day-Struktur gefunden.');
@@ -671,7 +673,7 @@ function parseBrightSkyForecast(data) {
   // Normalisiere minimal: [{ date, summary, temp_min, temp_max, condition }]
   return days.map(d => ({
     date: d.date || d.dt || d.timestamp || d.time || null,
-    summary: d.summary || d.description || (d.temp_min || '') + '–' + (d.temp_max || '') + '°C ' + (d.condition || ''),
+    summary: d.summary || d.description || (d.temp_min || '') + '�' + (d.temp_max || '') + '�C ' + (d.condition || ''),
     temp_min: d.temp_min || d.min_temp || null,
     temp_max: d.temp_max || d.max_temp || null
   }));
@@ -706,7 +708,7 @@ async function deleteMessage(client, channelId, messageId) {
     if (!channel) return;
     await channel.deleteMessage(messageId);
   } catch (error) {
-    console.warn(`Löschen der Nachricht ${messageId} fehlgeschlagen:`, error.message);
+    console.warn(`L�schen der Nachricht ${messageId} fehlgeschlagen:`, error.message);
   }
 }
 
@@ -718,11 +720,11 @@ async function postForecast(client, state) {
     // Abruf der BrightSky-Vorhersage
     const brightData = await fetchBrightSkyForecast();
     if (brightData === null) {
-      console.error('BrightSky Vorhersage konnte nicht geladen werden — Abbruch, sende keine Vorhersage.');
+      console.error('BrightSky Vorhersage konnte nicht geladen werden � Abbruch, sende keine Vorhersage.');
       return;
     }
 
-    // Extrahiere stündliche Daten: bevorzugt response.data.weather
+    // Extrahiere st�ndliche Daten: bevorzugt response.data.weather
     const weatherArray = (brightData && brightData.data && Array.isArray(brightData.data.weather))
       ? brightData.data.weather
       : Array.isArray(brightData.weather)
@@ -732,11 +734,11 @@ async function postForecast(client, state) {
           : null;
 
     if (!weatherArray || !weatherArray.length) {
-      console.log('[BrightSky] Keine stündlichen Wetterdaten gefunden, überspringe Vorhersage.');
+      console.log('[BrightSky] Keine st�ndlichen Wetterdaten gefunden, �berspringe Vorhersage.');
       return;
     }
 
-    // Gruppiere stündliche Einträge nach Datum (YYYY-MM-DD)
+    // Gruppiere st�ndliche Eintr�ge nach Datum (YYYY-MM-DD)
     const groups = {};
     for (const e of weatherArray) {
       const ts = e.timestamp || e.dt || e.time || e.date || e.datetime;
@@ -754,11 +756,11 @@ async function postForecast(client, state) {
 
     const allDates = Object.keys(groups).sort();
     if (!allDates.length) {
-      console.log('[BrightSky] Keine gruppierbaren Daten für Vorhersage gefunden.');
+      console.log('[BrightSky] Keine gruppierbaren Daten f�r Vorhersage gefunden.');
       return;
     }
 
-    // Wähle 3-7 Tage (min 3, max 7) beginnend ab heute, wenn möglich
+    // W�hle 3-7 Tage (min 3, max 7) beginnend ab heute, wenn m�glich
     const heuteStr = new Date().toISOString().split('T')[0];
     let selected = allDates.filter(d => d >= heuteStr).slice(0, 7);
     if (selected.length < 3) {
@@ -773,7 +775,7 @@ async function postForecast(client, state) {
       const minT = temps.length ? Math.min(...temps) : null;
       const maxT = temps.length ? Math.max(...temps) : null;
 
-      // Bestimme grobe Wetterbeschreibung (häufigste condition/symbol)
+      // Bestimme grobe Wetterbeschreibung (h�ufigste condition/symbol)
       const condCount = {};
       for (const ent of entries) {
         const cond = (ent.condition || ent.summary || ent.description || ent.symbol_code || ent.weather || '').toString();
@@ -785,7 +787,7 @@ async function postForecast(client, state) {
 
       const dateObj = new Date(dateKey + 'T00:00:00Z');
       const label = dateObj.toLocaleDateString('de-DE', { weekday: 'long', day: 'numeric', month: 'short' });
-      const tempStr = minT !== null && maxT !== null ? `${Math.round(minT)}–${Math.round(maxT)}°C` : 'Keine Temperaturdaten';
+      const tempStr = minT !== null && maxT !== null ? `${Math.round(minT)}�${Math.round(maxT)}�C` : 'Keine Temperaturdaten';
       const summary = `${tempStr} ${mainCond}`.trim();
       fields.push({ name: `${label}`, value: summary || 'Keine Daten', inline: false });
     }
@@ -793,8 +795,8 @@ async function postForecast(client, state) {
     fields.push({ name: 'Stand', value: formatTimestamp(Date.now()), inline: false });
 
     const embed = {
-      title: `📊 Allgemeiner Wetterbericht für Deutschland (Zentraler Richtwert)`,
-      description: `Automatisch aktualisierte Mehrtages‑Übersicht (Bright Sky) — zentraler Richtwert aus stündlichen Daten.`,
+      title: `?? Allgemeiner Wetterbericht f�r Deutschland (Zentraler Richtwert)`,
+      description: `Automatisch aktualisierte Mehrtages-�bersicht (Bright Sky) � zentraler Richtwert aus st�ndlichen Daten.`,
       color: 0x0066cc,
       fields,
       footer: { text: `Quelle: Bright Sky` },
@@ -824,12 +826,12 @@ async function postForecast(client, state) {
         // Fallback: edit via Channel
         await channel.editMessage(vorhersageNachricht.id, { embeds: [embed] });
       } else {
-        throw new Error('Keine gültige Vorhersage-Nachricht zum Editieren.');
+        throw new Error('Keine g�ltige Vorhersage-Nachricht zum Editieren.');
       }
       console.log('Wettervorhersage still aktualisiert.');
     } catch (editErr) {
       console.warn('Bearbeiten der Vorhersage fehlgeschlagen, sende neu:', editErr);
-      // Zur Sicherheit zurücksetzen, damit beim nächsten Lauf neu gesendet wird
+      // Zur Sicherheit zur�cksetzen, damit beim n�chsten Lauf neu gesendet wird
       vorhersageNachricht = null;
       if (state.vorhersageMessageId) { state.vorhersageMessageId = null; saveState(state); }
       try {
@@ -848,7 +850,6 @@ async function postForecast(client, state) {
 
 
 async function syncWeather(client, state) {
-  // BrightSky-only implementation: group alerts per Bundesland and send one embed per state
   try {
     const now = Date.now();
     const url = process.env.BRIGHT_SKY_ALERTS_URL || 'https://api.brightsky.dev/alerts';
@@ -857,86 +858,129 @@ async function syncWeather(client, state) {
     const res = await fetch(url, { headers: { 'User-Agent': 'WetterBot/1.0' }, signal: controller.signal });
     clearTimeout(timeoutId);
     const data = await res.json();
-    const alerts = data && Array.isArray(data.alerts) ? data.alerts : null;
+    const alerts = data && Array.isArray(data.alerts) ? data.alerts : [];
 
-    if (alerts && Array.isArray(alerts)) {
-      console.log(`[BrightSky Alerts] API erfolgreich abgefragt. Aktive Warnungen in Deutschland: ${alerts.length}. Sende-Sicherung ist aktiv.`);
+    console.log(`[BrightSky Alerts] API erfolgreich abgefragt. Aktive Warnungen in Deutschland: ${alerts.length}. Sende-Sicherung ist aktiv.`);
+    if (!alerts.length) return;
+
+    state.sentAlertKeys = Array.isArray(state.sentAlertKeys) ? state.sentAlertKeys : [];
+    state.bundeslandEmbedIds = state.bundeslandEmbedIds || {};
+    state.istBereit = Boolean(state.istBereit);
+    istBereit = state.istBereit;
+
+    const knownIds = new Set(state.sentAlertKeys);
+
+    if (!istBereit && knownIds.size === 0) {
+      for (const alert of alerts) {
+        if (!alert || !alert.id) continue;
+        knownIds.add(alert.id);
+        state.sentAlertKeys.push(alert.id);
+      }
+      istBereit = true;
+      state.istBereit = true;
+      saveState(state);
+      console.log('Erster Start: vorhandene Warnungen stumm gelernt. Keine Meldungen gesendet.');
+      return;
     }
-    if (!alerts || alerts.length === 0) return;
 
-    // Gruppiere Alerts nach Bundesland (letztes Element in alert.regions)
-    const stateGroups = {};
-    for (const alert of alerts) {
-      if (!alert) continue;
+    if (!istBereit && knownIds.size > 0) {
+      istBereit = true;
+      state.istBereit = true;
+      saveState(state);
+    }
+
+    if (!istBereit) {
+      return;
+    }
+
+    const newAlerts = alerts.filter(alert => alert && alert.id && !knownIds.has(alert.id));
+    if (!newAlerts.length) return;
+
+    const grouped = {};
+    for (const alert of newAlerts) {
       const headline = String(alert.headline || alert.title || alert.event || 'Warnung').trim();
       const description = String(alert.description || alert.body || '').trim();
-
-      // Regions kann Array oder String sein
       let regionsArr = [];
-      if (Array.isArray(alert.regions) && alert.regions.length) regionsArr = alert.regions.map(r => String(r).trim()).filter(Boolean);
-      else if (typeof alert.regions === 'string' && alert.regions.trim()) regionsArr = alert.regions.split(',').map(s => s.trim()).filter(Boolean);
-      else if (alert.region) regionsArr = [String(alert.region).trim()];
+      if (Array.isArray(alert.regions) && alert.regions.length) {
+        regionsArr = alert.regions.map(r => String(r).trim()).filter(Boolean);
+      } else if (typeof alert.regions === 'string' && alert.regions.trim()) {
+        regionsArr = alert.regions.split(',').map(r => r.trim()).filter(Boolean);
+      } else if (alert.region) {
+        regionsArr = [String(alert.region).trim()];
+      }
 
       const stateName = regionsArr.length ? regionsArr[regionsArr.length - 1] : 'Deutschland';
       const counties = regionsArr.length > 1 ? regionsArr.slice(0, -1) : (regionsArr.length === 1 ? [regionsArr[0]] : ['Deutschland']);
 
-      stateGroups[stateName] = stateGroups[stateName] || {};
-      const groupKey = headline;
-      if (!stateGroups[stateName][groupKey]) {
-        stateGroups[stateName][groupKey] = { description, counties: new Set() };
+      grouped[stateName] = grouped[stateName] || { warnings: new Map(), counties: new Set(), ids: [] };
+      const warnKey = `${headline}||${description}`;
+      if (!grouped[stateName].warnings.has(warnKey)) {
+        grouped[stateName].warnings.set(warnKey, { headline, description });
       }
-      for (const c of counties) stateGroups[stateName][groupKey].counties.add(c);
+      grouped[stateName].ids.push(alert.id);
+      for (const county of counties) {
+        grouped[stateName].counties.add(county || 'Gesamtgebiet');
+      }
     }
 
-    // Prepare state for sent summaries
-    state.sentStateSummaries = Array.isArray(state.sentStateSummaries) ? state.sentStateSummaries : [];
-    const seenSet = new Set(state.sentStateSummaries);
+    const channel = await client.rest.channels.get(WARNUNGEN_CHANNEL);
+    if (!channel) return;
 
-    // On first run: learn existing summaries silently
-    if (!state.stateSummarySeenInitial) {
-      for (const [stateName, groups] of Object.entries(stateGroups)) {
-        for (const [headline, info] of Object.entries(groups)) {
-          const counties = Array.from(info.counties).sort();
-          const key = `${stateName}:${headline}:${counties.join('|')}`;
-          if (!seenSet.has(key)) {
-            seenSet.add(key);
-            state.sentStateSummaries.push(key);
+    for (const [stateName, info] of Object.entries(grouped)) {
+      const counties = Array.from(info.counties).sort();
+      const countiesText = counties.join(', ') || 'Gesamtgebiet';
+      const detailsText = Array.from(info.warnings.values())
+        .map(w => `**${w.headline}**\n${w.description || 'Keine zus�tzliche Beschreibung.'}`)
+        .join('\n\n')
+        .substring(0, 1024);
+
+      const embed = {
+        title: `?? Wetterwarnungen f�r ${stateName}`,
+        color: 0xff3300,
+        fields: [
+          { name: 'Details', value: detailsText || 'Keine ausf�hrlichen Details verf�gbar.', inline: false },
+          { name: 'Betroffene Regionen', value: countiesText.substring(0, 1024), inline: false }
+        ],
+        footer: { text: 'Quelle: Bright Sky � Gruppierte Bundesland-Zusammenfassung' },
+        timestamp: new Date().toISOString()
+      };
+
+      const existingMessageId = state.bundeslandEmbedIds[stateName] || bundeslandEmbedIds[stateName];
+      if (existingMessageId) {
+        try {
+          await channel.editMessage(existingMessageId, { embeds: [embed] });
+          console.log(`Bundesland-Embed f�r ${stateName} aktualisiert.`);
+          bundeslandEmbedIds[stateName] = existingMessageId;
+          state.bundeslandEmbedIds[stateName] = existingMessageId;
+          for (const id of info.ids) {
+            if (!knownIds.has(id)) {
+              knownIds.add(id);
+              state.sentAlertKeys.push(id);
+            }
+          }
+          saveState(state);
+          continue;
+        } catch (err) {
+          console.warn(`Editieren des Bundesland-Embeds f�r ${stateName} fehlgeschlagen, sende neu:`, err && err.message ? err.message : err);
+          delete bundeslandEmbedIds[stateName];
+          delete state.bundeslandEmbedIds[stateName];
+        }
+      }
+
+      try {
+        const msg = await channel.createMessage({ embeds: [embed] });
+        bundeslandEmbedIds[stateName] = msg.id;
+        state.bundeslandEmbedIds[stateName] = msg.id;
+        for (const id of info.ids) {
+          if (!knownIds.has(id)) {
+            knownIds.add(id);
+            state.sentAlertKeys.push(id);
           }
         }
-      }
-      state.stateSummarySeenInitial = true;
-      saveState(state);
-      return;
-    }
-
-    // For each Bundesland and each grouped headline, send an embed if not seen
-    for (const [stateName, groups] of Object.entries(stateGroups)) {
-      for (const [headline, info] of Object.entries(groups)) {
-        const counties = Array.from(info.counties).sort();
-        const countiesStr = counties.join(', ') || 'Gesamtgebiet';
-        const key = `${stateName}:${headline}:${counties.join('|')}`;
-        if (seenSet.has(key)) continue; // already announced
-
-        // Build embed
-        const embed = {
-          title: `⚠️ Wetterwarnungen für ${stateName}`,
-          color: 0xff3300,
-          fields: [
-            { name: 'Details', value: `${headline}\n\n${info.description || 'Keine zusätzliche Beschreibung.'}`.substring(0, 1024), inline: false },
-            { name: 'Betroffene Regionen', value: countiesStr.substring(0, 1024), inline: false }
-          ],
-          footer: { text: 'Quelle: Bright Sky — Gruppierte Zusammenfassung' },
-          timestamp: new Date().toISOString()
-        };
-
-        try {
-          await sendEmbed(client, WARNUNGEN_CHANNEL, null, embed, null, ALERT_ROLE_ID);
-          seenSet.add(key);
-          state.sentStateSummaries.push(key);
-          saveState(state);
-        } catch (err) {
-          console.warn('Senden der gruppierten Bundesland-Warnung fehlgeschlagen:', err && err.message ? err.message : err);
-        }
+        saveState(state);
+        console.log(`Neue Bundesland-Zusammenfassung f�r ${stateName} gesendet.`);
+      } catch (err) {
+        console.warn(`Senden des Bundesland-Embeds f�r ${stateName} fehlgeschlagen:`, err && err.message ? err.message : err);
       }
     }
 
@@ -946,15 +990,13 @@ async function syncWeather(client, state) {
     console.warn('BrightSky Abruf fehlgeschlagen:', err && err.message ? err.message : err);
     return;
   }
-}
-
-function startHealthServer() {
+}function startHealthServer() {
   const port = Number(process.env.PORT || 3000);
   http.createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
-    res.end("WetterVorhersage-Bot läuft\n");
+    res.end("WetterVorhersage-Bot l�uft\n");
   }).listen(port, () => {
-    console.log(`Health-Server läuft auf Port ${port}`);
+    console.log(`Health-Server l�uft auf Port ${port}`);
   });
 }
 
@@ -994,3 +1036,4 @@ if (require.main === module) {
 }
 
 module.exports = { startBot };
+
