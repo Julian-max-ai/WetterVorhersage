@@ -39,6 +39,8 @@ let istBereit = false;
 let bundeslandEmbedIds = {};
 // Globale Referenz zur letzten gesendeten Vorhersage-Nachricht (wird zur stillen Aktualisierung genutzt)
 let vorhersageNachricht = null;
+let __mesoClient = null;
+let __mesoState = null;
 
 let webcamSources = [];
 if (process.env.WEBCAM_SOURCES) {
@@ -562,6 +564,144 @@ function parseDwdMesocycloneData(data) {
   return entries;
 }
 
+function parseLastXmlFilenameFromIndex(html) {
+  const regex = /href="([^"]+\.xml)"/gi;
+  let match;
+  let last = null;
+  while ((match = regex.exec(html)) !== null) {
+    last = match[1];
+  }
+  return last;
+}
+
+function parseDwdMesocycloneXml(xmlText) {
+  const rotations = [];
+  const rotationRe = /<mesocyclone[^>]*>([\s\S]*?)<\/mesocyclone>/gi;
+  let match;
+  while ((match = rotationRe.exec(xmlText)) !== null) {
+    const block = match[1];
+    const idMatch = block.match(/id="([^"]+)"/i);
+    const id = idMatch ? idMatch[1] : `meso_${Math.random().toString(36).slice(2, 9)}`;
+
+    const intensityMatch = block.match(/<(?:max_shear|shear|velocity|intensity)[^>]*>([^<]+)<\/(?:max_shear|shear|velocity|intensity)>/i);
+    const intensityAttrMatch = block.match(/(?:max_shear|shear|velocity|intensity)="([^"]+)"/i);
+    const intensity = intensityMatch ? Number(intensityMatch[1]) : intensityAttrMatch ? Number(intensityAttrMatch[1]) : null;
+
+    const coordsMatch = block.match(/<coordinates[^>]*>([^<]+)<\/coordinates>/i);
+    const posMatch = block.match(/<pos[^>]*>([^<]+)<\/pos>/i);
+    let coords = null;
+    if (coordsMatch && coordsMatch[1]) {
+      coords = coordsMatch[1].trim();
+    } else if (posMatch && posMatch[1]) {
+      coords = posMatch[1].trim().replace(/\s+/g, ',');
+    }
+
+    let motionDir = null;
+    let motionSpeed = null;
+    const motionBlock = block.match(/<storm_motion[^>]*>([\s\S]*?)<\/storm_motion>/i);
+    if (motionBlock && motionBlock[1]) {
+      motionDir = (motionBlock[1].match(/<direction[^>]*>([^<]+)<\/direction>/i) || [])[1] || null;
+      const speedStr = (motionBlock[1].match(/<speed[^>]*>([^<]+)<\/speed>/i) || [])[1] || null;
+      motionSpeed = speedStr ? Number(speedStr) : null;
+    }
+
+    rotations.push({
+      id,
+      intensity,
+      coords,
+      motionDir,
+      motionSpeed,
+      raw: block.trim()
+    });
+  }
+  return rotations;
+}
+
+async function checkMesozyklonen() {
+  if (!__mesoClient || !__mesoState) return;
+  console.log(`[${new Date().toLocaleTimeString('de-DE')}] [DWD Radar] Starte Verbindungsaufbau zu https://opendata.dwd.de/weather/radar/mesocyclones/...`);
+  try {
+    const res = await fetch(DWD_MESOCYCLONES_URL, { headers: { 'User-Agent': 'WetterBot/1.0' } });
+    if (!res.ok) {
+      throw new Error(`DWD Index HTTP ${res.status}`);
+    }
+    const html = await res.text();
+    const latestFilename = parseLastXmlFilenameFromIndex(html);
+    if (!latestFilename) {
+      throw new Error('Keine XML-Datei im DWD-Verzeichnis gefunden.');
+    }
+    console.log(`[${new Date().toLocaleTimeString('de-DE')}] [DWD Radar] Neueste XML-Datei gefunden: ${latestFilename}. Starte Download und Analyse...`);
+
+    const xmlRes = await fetch(`${DWD_MESOCYCLONES_URL}${latestFilename}`, { headers: { 'User-Agent': 'WetterBot/1.0' } });
+    if (!xmlRes.ok) {
+      throw new Error(`DWD XML HTTP ${xmlRes.status}`);
+    }
+    const xmlText = await xmlRes.text();
+    const rotations = parseDwdMesocycloneXml(xmlText);
+    console.log(`[${new Date().toLocaleTimeString('de-DE')}] [DWD Radar] XML erfolgreich analysiert. Gefundene Rotationen: ${rotations.length}.`);
+
+    __mesoState.mesozyklonMessageIds = __mesoState.mesozyklonMessageIds || {};
+    const activeIds = new Set();
+    const channel = await __mesoClient.rest.channels.get(WARNUNGEN_CHANNEL);
+    if (!channel) return;
+
+    for (const rotation of rotations) {
+      activeIds.add(rotation.id);
+      const entry = normalizeEntry({
+        id: rotation.id,
+        quelle: 'DWD-Mesocyclones',
+        ereignis: `Rotation ${rotation.id}`,
+        beschreibung: `Intensität: ${rotation.intensity !== null ? rotation.intensity + ' m/s' : 'unbekannt'}\nKoordinaten: ${rotation.coords || 'unbekannt'}\nZugrichtung: ${rotation.motionDir || 'unbekannt'} ${rotation.motionSpeed !== null ? rotation.motionSpeed + ' m/s' : ''}`,
+        landkreis: rotation.coords || 'Unbekannt',
+        region: 'DWD-Mesocyclones',
+        schwere: rotation.intensity !== null ? 'Rotation' : 'Unbekannt',
+        kategorie: 'rotation',
+        bestatigt: false,
+        start: Date.now(),
+        letztesUpdate: Date.now(),
+        mehrInfoUrl: `${DWD_MESOCYCLONES_URL}${latestFilename}`
+      }, 'DWD-Mesocyclones');
+      const embed = buildEmbed(entry);
+
+      const existingMessageId = __mesoState.mesozyklonMessageIds[rotation.id];
+      try {
+        if (existingMessageId) {
+          await channel.editMessage(existingMessageId, { embeds: [embed] });
+        } else {
+          const msg = await channel.createMessage({ embeds: [embed] });
+          __mesoState.mesozyklonMessageIds[rotation.id] = msg.id;
+        }
+      } catch (err) {
+        console.error(`[${new Date().toLocaleTimeString('de-DE')}] [DWD Radar] KRITISCHER FEHLER beim Auslesen des Verzeichnisses:`, err && err.message ? err.message : err);
+      }
+    }
+
+    // Lösche nicht mehr existierende Rotationen
+    for (const id of Object.keys(__mesoState.mesozyklonMessageIds)) {
+      if (!activeIds.has(id)) {
+        const msgId = __mesoState.mesozyklonMessageIds[id];
+        try {
+          await channel.deleteMessage(msgId);
+        } catch (_) {
+          // Ignoriere Fehler beim Löschen
+        }
+        delete __mesoState.mesozyklonMessageIds[id];
+      }
+    }
+
+    saveState(__mesoState);
+  } catch (error) {
+    console.error(`[${new Date().toLocaleTimeString('de-DE')}] [DWD Radar] KRITISCHER FEHLER beim Auslesen des Verzeichnisses:`, error && error.message ? error.message : error);
+  }
+}
+
+// Globaler Mesozyklonen-Intervall, 5 Minuten
+setInterval(() => {
+  checkMesozyklonen().catch(err => {
+    console.error(`[${new Date().toLocaleTimeString('de-DE')}] [DWD Radar] KRITISCHER FEHLER im globalen Intervall:`, err && err.message ? err.message : err);
+  });
+}, 300000);
+
 // Bright Sky (DWD-Daten) integration � optional, wenn BRIGHT_SKY_URL gesetzt ist.
 async function fetchBrightSkyWarnings() {
   const url = BRIGHT_SKY_ALERTS_URL;
@@ -1017,6 +1157,11 @@ async function startBot() {
     // Wetter synchronisieren
     await syncWeather(client, state);
     setInterval(() => syncWeather(client, state), POLL_INTERVAL_MS);
+
+    // Mesozyklonen einmalig abfragen und client/state global speichern
+    __mesoClient = client;
+    __mesoState = state;
+    await checkMesozyklonen();
     
     // Vorhersage alle 2 Tage neu aktualisieren
     setInterval(() => postForecast(client, state), 2 * 24 * 60 * 60 * 1000);
