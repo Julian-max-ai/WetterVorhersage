@@ -12,6 +12,7 @@ if (!global.fetch) {
 // Konstanten
 const POLL_INTERVAL_MS = 60 * 1000;
 const MESO_INTERVAL_MS = 5 * 60 * 1000;
+const FORECAST_INTERVAL_MS = 10 * 60 * 1000;
 const DWD_MESOCYCLONES_URL = 'https://opendata.dwd.de/weather/radar/mesocyclones/';
 const BRIGHT_SKY_BASE = 'https://api.brightsky.dev';
 const WARNUNGEN_CHANNEL = process.env.WARNUNGEN_CHANNEL || '1501843095485022350';
@@ -47,6 +48,8 @@ function saveState(state) {
 // BrightSky Alerts synchronisieren
 async function syncWeather(client, state) {
   try {
+    console.log(`[${new Date().toLocaleTimeString('de-DE')}] [BrightSky Alerts] Starte Abruf von https://api.brightsky.dev...`);
+    
     const now = Date.now();
     const url = process.env.BRIGHT_SKY_ALERTS_URL || (BRIGHT_SKY_BASE + '/alerts');
     const controller = new AbortController();
@@ -59,7 +62,8 @@ async function syncWeather(client, state) {
     const data = await res.json();
     const alerts = Array.isArray(data) ? data : (Array.isArray(data.alerts) ? data.alerts : []);
 
-    console.log(`[${new Date().toLocaleTimeString('de-DE')}] [BrightSky] Gefetcht: ${alerts.length} Warnungen`);
+    const ersterStart = !state._alertsInitialized;
+    console.log(`[${new Date().toLocaleTimeString('de-DE')}] [BrightSky Alerts] Abruf erfolgreich! ${alerts.length} Warnungen in Deutschland aktiv. Erststart: ${ersterStart}`);
     
     state.sentAlertKeys = Array.isArray(state.sentAlertKeys) ? state.sentAlertKeys : [];
     state.bundeslandEmbedIds = state.bundeslandEmbedIds || {};
@@ -218,13 +222,15 @@ async function syncWeather(client, state) {
     state.letzteSync = now;
     saveState(state);
   } catch (err) {
-    console.warn(`[${new Date().toLocaleTimeString('de-DE')}] BrightSky Fehler: ${err && err.message ? err.message : err}`);
+    console.error(`[${new Date().toLocaleTimeString('de-DE')}] [BrightSky Alerts] FEHLER beim Abruf:`, err && err.message ? err.message : err);
   }
 }
 
 // Vorhersage synchronisieren
 async function postForecast(client, state) {
   try {
+    console.log(`[${new Date().toLocaleTimeString('de-DE')}] [BrightSky Vorhersage] Starte Abruf der 3-7 Tage Vorhersage...`);
+    
     const lat = process.env.BRIGHT_SKY_LAT || '51.1657';
     const lon = process.env.BRIGHT_SKY_LON || '10.4515';
     const today = new Date().toISOString().split('T')[0];
@@ -237,39 +243,32 @@ async function postForecast(client, state) {
     
     if (!weather.length) return;
     
-    const grouped = {};
-    for (const entry of weather) {
-      const date = entry.timestamp ? entry.timestamp.split(' ')[0] : new Date().toISOString().split('T')[0];
-      if (!grouped[date]) grouped[date] = [];
-      grouped[date].push(entry);
-    }
+    console.log(`[${new Date().toLocaleTimeString('de-DE')}] [BrightSky Vorhersage] Abruf erfolgreich! Verarbeite stündliche Daten und aktualisiere das Discord-Embed.`);
+    
+    const temps = weather.filter(e => e.temperature !== undefined).map(e => e.temperature);
+    if (!temps.length) return;
+    
+    const minTemp = Math.min(...temps);
+    const maxTemp = Math.max(...temps);
+    
+    const embed = {
+      title: `🌡️ Wettervorhersage für heute`,
+      color: 0x3498db,
+      description: `**Minimum:** ${minTemp}°C  |  **Maximum:** ${maxTemp}°C`,
+      footer: { text: 'Quelle: Bright Sky' },
+      timestamp: new Date().toISOString()
+    };
     
     const channel = await client.rest.channels.get(VORHERSAGE_CHANNEL);
     if (!channel) return;
     
-    for (const [date, entries] of Object.entries(grouped)) {
-      const temps = entries.filter(e => e.temperature !== undefined).map(e => e.temperature);
-      if (!temps.length) continue;
-      
-      const minTemp = Math.min(...temps);
-      const maxTemp = Math.max(...temps);
-      
-      const embed = {
-        title: `🌡️ Vorhersage für ${date}`,
-        description: `Minimum: ${minTemp}°C, Maximum: ${maxTemp}°C`,
-        color: 0x3498db,
-        timestamp: new Date().toISOString()
-      };
-      
-      try {
-        await channel.createMessage({ embeds: [embed] });
-        console.log(`[${new Date().toLocaleTimeString('de-DE')}] Vorhersage für ${date} gesendet.`);
-      } catch (err) {
-        console.warn(`Vorhersage-Fehler: ${err && err.message ? err.message : err}`);
-      }
+    try {
+      await channel.createMessage({ embeds: [embed] });
+    } catch (err) {
+      console.warn(`Vorhersage-Sende-Fehler: ${err && err.message ? err.message : err}`);
     }
   } catch (err) {
-    console.warn(`[${new Date().toLocaleTimeString('de-DE')}] Vorhersage Fehler: ${err && err.message ? err.message : err}`);
+    console.error(`[${new Date().toLocaleTimeString('de-DE')}] [BrightSky Vorhersage] FEHLER beim Abruf:`, err && err.message ? err.message : err);
   }
 }
 
@@ -323,7 +322,7 @@ function parseLastXmlFilenameFromIndex(html) {
 async function checkMesozyklonen() {
   if (!__mesoClient || !__mesoState) return;
   
-  console.log(`[${new Date().toLocaleTimeString('de-DE')}] [DWD] Starte Mesocyclonen-Check...`);
+  console.log(`[${new Date().toLocaleTimeString('de-DE')}] [DWD Radar] Rufe Verzeichnis ab: https://opendata.dwd.de/weather/radar/mesocyclones/`);
   try {
     const res = await fetch(DWD_MESOCYCLONES_URL, { headers: { 'User-Agent': 'WetterBot/1.0' } });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -332,14 +331,14 @@ async function checkMesozyklonen() {
     const latestFilename = parseLastXmlFilenameFromIndex(html);
     if (!latestFilename) throw new Error('Keine XML-Datei gefunden');
     
-    console.log(`[${new Date().toLocaleTimeString('de-DE')}] [DWD] XML gefunden: ${latestFilename}`);
+    console.log(`[${new Date().toLocaleTimeString('de-DE')}] [DWD Radar] Neueste XML-Datei gefunden: ${latestFilename}. Starte Download und Analyse...`);
 
     const xmlRes = await fetch(DWD_MESOCYCLONES_URL + latestFilename, { headers: { 'User-Agent': 'WetterBot/1.0' } });
     if (!xmlRes.ok) throw new Error(`XML HTTP ${xmlRes.status}`);
     
     const xmlText = await xmlRes.text();
     const rotations = parseDwdMesocycloneXml(xmlText);
-    console.log(`[${new Date().toLocaleTimeString('de-DE')}] [DWD] ${rotations.length} Rotationen analysiert.`);
+    console.log(`[${new Date().toLocaleTimeString('de-DE')}] [DWD Radar] XML erfolgreich analysiert. Gefundene Rotationen: ${rotations.length}.`);
 
     __mesoState.mesozyklonMessageIds = __mesoState.mesozyklonMessageIds || {};
     const activeIds = new Set();
@@ -391,7 +390,7 @@ async function checkMesozyklonen() {
 
     saveState(__mesoState);
   } catch (err) {
-    console.warn(`[${new Date().toLocaleTimeString('de-DE')}] [DWD] Fehler: ${err && err.message ? err.message : err}`);
+    console.error(`[${new Date().toLocaleTimeString('de-DE')}] [DWD Radar] FEHLER bei Mesozyklonen-Analyse:`, err && err.message ? err.message : err);
   }
 }
 
@@ -425,7 +424,7 @@ function startBot() {
       console.log(`[${new Date().toLocaleTimeString('de-DE')}] Registriere globale Intervalle...`);
       setInterval(() => syncWeather(client, state).catch(e => console.warn('[BrightSky]:', e && e.message ? e.message : e)), POLL_INTERVAL_MS);
       setInterval(() => checkMesozyklonen().catch(e => console.warn('[DWD]:', e && e.message ? e.message : e)), MESO_INTERVAL_MS);
-      setInterval(() => postForecast(client, state).catch(e => console.warn('[Forecast]:', e && e.message ? e.message : e)), 2 * 24 * 60 * 60 * 1000);
+      setInterval(() => postForecast(client, state).catch(e => console.warn('[Forecast]:', e && e.message ? e.message : e)), FORECAST_INTERVAL_MS);
       __intervalsRegistered = true;
     }
   });
